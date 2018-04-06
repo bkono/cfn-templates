@@ -24,7 +24,7 @@ Parameters:
     AllowedValues:
         - true
         - false
-    Default: false
+    Default: true
   Branch:
     Description: '[Optional] branch to build.'
     Type: String
