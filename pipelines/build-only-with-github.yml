@@ -1,0 +1,280 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Codebuild Pipeline with Github Source'
+Parameters:
+  Project:
+    Description: '[Required] project name, will be used with various build resources.'
+    Type: String
+    AllowedPattern: '[A-Za-z0-9-]+'
+  BuildComputeType:
+      Description: '[Optional] CodeBuild compute type.'
+      Type: String
+      AllowedValues:
+          - BUILD_GENERAL1_SMALL
+          - BUILD_GENERAL1_MEDIUM
+          - BUILD_GENERAL1_LARGE
+      Default: BUILD_GENERAL1_SMALL
+  BuildImage:
+      Description: '[Optional] CodeBuild environment image.'
+      Type: String
+      Default: 'aws/codebuild/docker:17.09.0'
+  BuildPrivilegedMode:
+    Description: 'Privileged mode flag to control docker daemon access during CodeBuild stage.'
+    Type: String
+    AllowedValues:
+        - true
+        - false
+    Default: false
+  Branch:
+    Description: '[Optional] branch to build.'
+    Type: String
+    Default: master
+  GithubOAuthToken:
+    Description: "[Required] OAuth token to access the repository. Needs 'repo' and 'admin:repo_hook' permissions."
+    Type: String
+  GithubRepoName:
+    Description: '[Required] repository name to build.'
+    Type: String
+  GithubUser:
+    Description: '[Required] username of the repository owner.'
+    Type: String
+  TimeoutInMinutes:
+      Description: '[Optional] maximum time to allow the build step to run.'
+      Type: Number
+      MinValue: 5
+      MaxValue: 60
+      Default: 15
+Metadata:
+  AWS::CloudFormation:::Interface:
+    - Label:
+        default: Application Config
+      Parameters:
+        - Project
+    - Label:
+        default: Build Config
+      Parameters:
+        - BuildComputeType
+        - BuildImage
+        - BuildPrivilegedMode
+        - TimeoutInMinutes
+    - Label:
+        default: Github Config
+      Parameters:
+      - Branch
+      - GithubOAuthToken
+      - GithubRepoName
+      - GithubUser
+Resources:
+  ArtifactsBucket:
+    DeletionPolicy: Retain
+    Type: 'AWS::S3::Bucket'
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${Project}-pipeline
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactsBucket
+      RoleArn: !Sub ${CodePipelineRole.Arn}
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: FetchSource
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              OutputArtifacts:
+                  -  Name: 'SourceOut'
+              Configuration:
+                  Owner: !Ref GithubUser
+                  Repo: !Ref GithubRepoName
+                  Branch: !Ref Branch
+                  OAuthToken: !Ref GithubOAuthToken
+        - Name: Build
+          Actions:
+            - Name: CodeBuild
+              InputArtifacts:
+                - Name: 'SourceOut'
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: 'BuildOut'
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+        Name: !Sub ${AWS::StackName}-app
+        Description: !Sub Build project for ${Project}
+        ServiceRole: !Ref CodeBuildRole
+        Source:
+            Type: CODEPIPELINE
+        Environment:
+            ComputeType: !Sub ${BuildComputeType}
+            Image: !Ref BuildImage
+            PrivilegedMode: !Ref BuildPrivilegedMode
+            Type: LINUX_CONTAINER
+            EnvironmentVariables:
+                - Name: ARTIFACT_S3_BUCKET
+                  Value: !Sub ${ArtifactsBucket}
+                - Name: IMAGE_REPO_NAME
+                  Value: !Sub ${Project}
+                - Name: AWS_ACCOUNT_ID
+                  Value: !Sub ${AWS::AccountId}
+        Artifacts:
+            Type: CODEPIPELINE
+        TimeoutInMinutes: !Sub ${TimeoutInMinutes}
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+        RoleName: !Sub ${Project}-CodeBuild-${AWS::Region}
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - 'codebuild.amazonaws.com'
+            Action:
+            - 'sts:AssumeRole'
+        Policies:
+            - PolicyName: !Sub ${Project}-CodeBuild-${AWS::Region}
+              PolicyDocument: !Sub |
+                {
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Resource": [ "*" ],
+                            "Action": [
+                                "logs:CreateLogGroup",
+                                "logs:CreateLogStream",
+                                "logs:PutLogEvents"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Resource": [
+                                "arn:aws:s3:::${ArtifactsBucket}/*"
+                            ],
+                            "Action": [
+                                "s3:GetObject",
+                                "s3:GetObjectVersion",
+                                "s3:PutObject"
+                            ]
+                        },
+                        {
+                          "Sid": "ECRPolicy",
+                          "Effect": "Allow",
+                          "Resource": "*",
+                          "Action": [
+                            "ecr:BatchCheckLayerAvailability",
+                            "ecr:BatchGetImage",
+                            "ecr:CompleteLayerUpload",
+                            "ecr:DescribeImages",
+                            "ecr:DescribeRepositories",
+                            "ecr:GetAuthorizationToken",
+                            "ecr:GetDownloadUrlForLayer",
+                            "ecr:GetRepositoryPolicy",
+                            "ecr:InitiateLayerUpload",
+                            "ecr:ListImages",
+                            "ecr:PutImage",
+                            "ecr:UploadLayerPart"
+                          ]
+                        }
+                      ]
+                    }
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - 'codepipeline.amazonaws.com'
+          Action:
+          - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: !Sub ${Project}-CodePipeline-${AWS::Region}
+          PolicyDocument: !Sub |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                { "Sid": "S3BucketVersioningPolicy",
+                  "Action": ["s3:GetBucketVersioning"],
+                  "Effect": "Allow",
+                  "Resource": "arn:aws:s3:::${ArtifactsBucket}"
+                },
+                {
+                  "Sid": "S3ObjectPolicy",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:GetObjectVersion",
+                    "s3:PutObject"
+                  ],
+                  "Effect": "Allow",
+                  "Resource": "arn:aws:s3:::${ArtifactsBucket}/*"
+                },
+                {
+                  "Sid": "CodeDeployPolicy",
+                  "Action": [
+                    "codedeploy:CreateDeployment",
+                    "codedeploy:GetApplicationRevision",
+                    "codedeploy:GetDeployment",
+                    "codedeploy:GetDeploymentConfig",
+                    "codedeploy:RegisterApplicationRevision"
+                  ],
+                  "Effect": "Allow",
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "CfnPolicy",
+                  "Action": [
+                    "cloudformation:CreateChangeSet",
+                    "cloudformation:CreateStack",
+                    "cloudformation:DeleteChangeSet",
+                    "cloudformation:DeleteStack",
+                    "cloudformation:DescribeChangeSet",
+                    "cloudformation:DescribeStacks",
+                    "cloudformation:ExecuteChangeSet",
+                    "cloudformation:SetStackPolicy",
+                    "cloudformation:UpdateStack",
+                    "cloudformation:ValidateTemplate",
+                    "iam:PassRole"
+                  ],
+                  "Effect": "Allow",
+                  "Resource": "*"
+                },
+                {
+                  "Action": [
+                    "codebuild:BatchGetBuilds",
+                    "codebuild:StartBuild"
+                  ],
+                  "Resource": "*",
+                  "Effect": "Allow"
+                },
+                {
+                  "Sid": "CloudWatchLogsPolicy",
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Effect": "Allow",
+                  "Resource": "*"
+                }
+              ]
+            }
+Outputs:
+  CodePipelineURL:
+    Description: The URL for the created pipeline
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${Project}-pipeline
+
