@@ -30,8 +30,9 @@ Parameters:
     Type: String
     Default: master
   GithubOAuthToken:
-    Description: "[Required] OAuth token to access the repository. Needs 'repo' and 'admin:repo_hook' permissions."
-    Type: String
+    Description: "[Required] ParameterStore location for an OAuth token to access the repository. Needs 'repo' and 'admin:repo_hook' permissions."
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: "/ops/github_token"
   GithubRepoName:
     Description: '[Required] repository name to build.'
     Type: String
