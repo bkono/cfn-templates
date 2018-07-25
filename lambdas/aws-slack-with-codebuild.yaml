@@ -1,0 +1,70 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  HookUrl:
+    Description: '[Optional] Slack webhook URL; see https://example.slack.com/apps/. Will fallback to param store.'
+    Type: String
+    Default: ''
+  HookUrlParamStorePath:
+    Description: '[Optional] Param store path for the Slack webhook URL. Defaults to /ops/slack_webhook'
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: "/ops/slack_webhook"
+  Channel:
+    Description: '[Optional] Channel name to post messages into.'
+    Type: String
+    Default: ''
+
+Conditions:
+  HasChannel: !Not [!Equals [!Ref Channel, '']]
+  HasHookUrl: !Not [!Equals [!Ref HookUrl, '']]
+
+Resources:
+  SlackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/index.handler
+      Runtime: nodejs6.10
+      CodeUri: s3://aws-to-slack/release.zip
+      MemorySize: 256
+      Timeout: 10
+      Policies: CloudWatchReadOnlyAccess
+      Environment:
+        Variables:
+          SLACK_HOOK_URL: !If [HasHookUrl, !Ref HookUrl, !Ref HookUrlParamStorePath]
+          SLACK_CHANNEL: !If [HasChannel, !Ref Channel, !Ref 'AWS::NoValue']
+  BuildEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: 'BuildEventRule'
+      EventPattern:
+        source:
+          - 'aws.codebuild'
+        detail-type:
+          - 'CodeBuild Build State Change'
+        detail:
+          build-status:
+            - 'IN_PROGRESS'
+            - 'SUCCEEDED'
+            - 'FAILED'
+            - 'STOPPED'
+      State: 'ENABLED'
+      Targets:
+        -
+          Arn: !GetAtt SlackFunction.Arn
+          Id: 'BuildRuleLambdaTarget'
+  PermissionForBuildEventsToInvokeLambda:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Ref SlackFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt BuildEventRule.Arn
+
+Outputs:
+  SlackFunctionArn:
+    Description: ARN for the aws-slack lambda.
+    Value: !GetAtt SlackFunction.Arn
+    Export:
+      Name: SlackFunctionArn
+
